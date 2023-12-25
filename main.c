@@ -8,20 +8,25 @@
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include "lrc.h"
 
 void user_ui(int argc,char *argv[],int kid_uid);
 void music_player();
 void quit_event(GtkWidget* win,gpointer user_data);
 void button_event(GtkWidget* button,gpointer user_data);
-void* progress_speed_fun1(void * arg);
-void* progress_speed_fun2(void * arg);
+void* words_send(void * arg);
+void* words_receive(void * arg);
+void lrc_init();
+void lrc_free();
 
-
-int flag=0;
+int flag=0,n=2;
 int fd_ui,fd[2];
 int music_id=0;
+char* lrc_file[20]={"./lrc/1.lrc","./lrc/2.lrc"};
 char* music[20]={"./music/1.mp3","./music/2.mp3"};
+lrc_ptr *lrc_words[20];
 GtkWidget* debug;
+GtkWidget* show_words;
 GtkWidget* progress_speed;
 GtkWidget* progress_voice;
 
@@ -56,6 +61,8 @@ void user_ui(int argc,char *argv[],int kid_uid)
     char str_kid_uid[10];
     sprintf(str_kid_uid,"%d",kid_uid);
 
+    lrc_init();
+
     gtk_init(&argc, &argv);
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(win),"MusicPlayer");
@@ -66,10 +73,14 @@ void user_ui(int argc,char *argv[],int kid_uid)
     gtk_container_add(GTK_WINDOW(win),table);
     
     debug = gtk_label_new("debug");
-    gtk_table_attach_defaults(GTK_TABLE(table),debug,0,3,0,6);
+    gtk_table_attach_defaults(GTK_TABLE(table),debug,0,3,0,3);
+
+    show_words = gtk_label_new("");
+    gtk_table_attach_defaults(GTK_TABLE(table),show_words,0,3,3,6);
+    gtk_label_set_text(GTK_LABEL(show_words),"debug");
 
     // progress_bar show
-    GtkWidget* progress_speed = gtk_progress_bar_new();
+    progress_speed = gtk_progress_bar_new();
     gtk_table_attach_defaults(GTK_TABLE(table),progress_speed,0,3,6,7);
     gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(progress_speed),0);
     gtk_progress_bar_set_text(GTK_PROGRESS_BAR(progress_speed),"speed");
@@ -95,6 +106,14 @@ void user_ui(int argc,char *argv[],int kid_uid)
     GtkWidget* btn_next = gtk_button_new_with_label("next");
     gtk_table_attach_defaults(GTK_TABLE(table),btn_next,2,3,9,10);
 
+    pthread_t tid_progress_send;
+	pthread_create(&tid_progress_send, NULL, words_send, NULL);
+	pthread_detach(tid_progress_send);
+
+    pthread_t tid_progress_receive;
+	pthread_create(&tid_progress_receive, NULL, words_receive, NULL);
+	pthread_detach(tid_progress_receive);
+
     g_signal_connect(btn_last,"clicked",G_CALLBACK(button_event),NULL);
     g_signal_connect(btn_start,"clicked",G_CALLBACK(button_event),NULL);
     g_signal_connect(btn_next,"clicked",G_CALLBACK(button_event),NULL);
@@ -114,12 +133,63 @@ void music_player()
 				"file=./fifo_temp_file", NULL);
 }
 
+void lrc_init()
+{
+    for(int i=0;i<n;i++)
+    {
+        char *file=open_lrc(lrc_file[i]);
+        lrc_words[i]=get_all_line(file,lrc_words[i]);
+        sort_lrc(lrc_words[i]);
+    }
+}
+
+void lrc_free()
+{
+    for(int i=0;i<1;i++) free_array(lrc_words[i]);
+}
+
+void* words_send(void *arg)
+{
+    while(1)
+    {
+        while(!flag);
+        write(fd_ui,"get_time_pos\n",strlen("get_time_pos\n"));
+        sleep(1);
+    }
+}
+
+void* words_receive(void *arg)
+{
+    while(1)
+    {
+        char buf[128];
+        read(fd[0],buf,sizeof(buf));
+        if(strlen(buf) > 18) {
+			if(buf[0] == 'A' && buf[16] == 'N') {
+				int tm = 0;
+				sscanf(buf,"ANS_TIME_POSITION=%d",&tm);
+				lrc_ptr* ptr=lrc_words[music_id];
+                for(int j=0;j<ptr->array_size;j++)
+                    if(tm==ptr->ptr_array[j]->timescale)
+                        gtk_label_set_text(GTK_LABEL(show_words),ptr->ptr_array[j]->words);
+            
+			}
+		}
+    }
+    
+}
+
 void quit_event(GtkWidget* win,gpointer user_data)
 {
-    printf("DEBUG");
     char quit_id[100];
     sprintf(quit_id,"kill -9 %s",(char*)user_data);
-    system(quit_id);
+    if(system(quit_id)==-1)
+    {
+        perror("system error");
+        exit(-1);
+    }
+
+    lrc_free();
     g_signal_connect(win,"destroy",G_CALLBACK(gtk_main_quit),NULL);
 }
     
@@ -133,16 +203,20 @@ void button_event(GtkWidget* button,gpointer user_data)
         gtk_label_set_text(GTK_LABEL(debug),"get into button_event");
         write(fd_ui,"loadfile ./music/1.mp3\n",strlen("loadfile ./music/1.mp3\n"));
         gtk_button_set_label(GTK_BUTTON(button), "pause");
+        flag=1;
         
     } else if(button_name[0]=='n') {
-        music_id=(music_id+1)%2;
+        music_id=(music_id+1)%n;
         char next_name[50];
         sprintf(next_name,"loadfile %s\n",music[music_id]);
         write(fd_ui,next_name,strlen(next_name));
     } else if(button_name[0]=='l') {
-        music_id=(music_id-1+2)%2;
+        music_id=(music_id-1+n)%n;
         char last_name[50];
         sprintf(last_name,"loadfile %s\n",music[music_id]);
         write(fd_ui,last_name,strlen(last_name));
+    } else if(button_name[0]=='p') {
+        write(fd_ui, "pause\n", strlen("pause\n"));
+		flag = !flag;
     }
 }
